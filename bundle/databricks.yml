@@ -1,0 +1,106 @@
+# Official docs: https://docs.databricks.com/aws/en/dev-tools/bundles/settings
+# Add workspace.host to each target, or use a correctly configured authentication context.
+# Serverless job: no explicit classic cluster. No schedule is enabled.
+bundle:
+  name: dea-study-lakehouse
+variables:
+  catalog:
+    description: Existing writable Unity Catalog catalog
+    default: workspace
+  prefix:
+    description: Isolated lab schema prefix
+    default: dea_riccardo
+resources:
+  jobs:
+    orders_job:
+      name: dea-orders-${bundle.target}
+      max_concurrent_runs: 1
+      parameters:
+      - name: join_type
+        default: left
+      tasks:
+      - task_key: quality
+        notebook_task:
+          notebook_path: ./src/quality.py
+          base_parameters:
+            catalog: ${var.catalog}
+            prefix: ${var.prefix}
+            join_type: '{{job.parameters.join_type}}'
+        timeout_seconds: 900
+        max_retries: 1
+        min_retry_interval_millis: 10000
+      - task_key: choose_join
+        depends_on:
+        - task_key: quality
+        condition_task:
+          op: EQUAL_TO
+          left: '{{job.parameters.join_type}}'
+          right: left
+      - task_key: left_join
+        notebook_task:
+          notebook_path: ./src/join.py
+          base_parameters:
+            catalog: ${var.catalog}
+            prefix: ${var.prefix}
+            how: left
+        timeout_seconds: 900
+        max_retries: 1
+        min_retry_interval_millis: 10000
+        depends_on:
+        - task_key: choose_join
+          outcome: 'true'
+      - task_key: inner_join
+        notebook_task:
+          notebook_path: ./src/join.py
+          base_parameters:
+            catalog: ${var.catalog}
+            prefix: ${var.prefix}
+            how: inner
+        timeout_seconds: 900
+        max_retries: 1
+        min_retry_interval_millis: 10000
+        depends_on:
+        - task_key: choose_join
+          outcome: 'false'
+      - task_key: publish
+        notebook_task:
+          notebook_path: ./src/publish.py
+          base_parameters:
+            catalog: ${var.catalog}
+            prefix: ${var.prefix}
+        timeout_seconds: 900
+        max_retries: 1
+        min_retry_interval_millis: 10000
+        depends_on:
+        - task_key: left_join
+        - task_key: inner_join
+        run_if: AT_LEAST_ONE_SUCCESS
+      - task_key: per_country
+        depends_on:
+        - task_key: publish
+        for_each_task:
+          inputs: '[{"country":"IT"},{"country":"FR"}]'
+          concurrency: 1
+          task:
+            task_key: country_output
+            notebook_task:
+              notebook_path: ./src/country.py
+              base_parameters:
+                catalog: ${var.catalog}
+                prefix: ${var.prefix}
+                country: '{{input.country}}'
+            timeout_seconds: 900
+            max_retries: 1
+            min_retry_interval_millis: 10000
+targets:
+  dev:
+    default: true
+    mode: development
+  test:
+    mode: production
+    variables:
+      prefix: dea_riccardo_test
+  prod:
+    mode: production
+    variables:
+      prefix: dea_riccardo_prod
